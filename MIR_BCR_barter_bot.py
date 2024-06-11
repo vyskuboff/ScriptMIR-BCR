@@ -47,12 +47,12 @@ income_patterns = [
     re.compile(r'Перевод\s+из\s+.*?\+?(\d[\d\s]*[\.,]?\d*)\s*р', re.IGNORECASE),
     re.compile(r'Перевод\s+(\d[\d\s]*[\.,]?\d*)\s*р\s+от', re.IGNORECASE),
     re.compile(r'(?:зачисление|пополнение)\s+(\d[\d\s]*[\.,]?\d*)\s*р', re.IGNORECASE),
-	re.compile(r'зачислен перевод по СБП\s+(\d[\d\s]*[\.,]?\d*)\s*р', re.IGNORECASE)	
+    re.compile(r'зачислен перевод по СБП\s+(\d[\d\s]*[\.,]?\d*)\s*р', re.IGNORECASE)	
 ]
 expense_patterns = [
     re.compile(r'(?:Покупка|Оплата|Списание|Выдача)\s+(\d[\d\s]*[\.,]?\d*)\s*р', re.IGNORECASE),
     re.compile(r'перевод\s+(\d[\d\s]*[\.,]?\d*)\s*р(?!\s+от|\s+из)', re.IGNORECASE),
-	re.compile(r'Покупка по СБП\s+(\d[\d\s]*[\.,]?\d*)\s*р', re.IGNORECASE)
+    re.compile(r'Покупка по СБП\s+(\d[\d\s]*[\.,]?\d*)\s*р', re.IGNORECASE)
 ]
 
 # Функция для поиска совпадений по паттернам
