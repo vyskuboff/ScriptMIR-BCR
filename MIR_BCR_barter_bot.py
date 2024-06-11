@@ -76,7 +76,7 @@ def process_sms(sms_data, mysql_conn, pg_conn):
         return
 
     if find_pattern(stop_words_patterns, sms_text):
-        send_telegram_message(f"SMS обработано:\n Найдено стоп слово(Отказ или недостаточн осредств) - игнорируем смс\n{sms_text}")
+        send_telegram_message(f"SMS обработано:\n Найдено стоп слово (Отказ или недостаточно средств) - игнорируем смс\n{sms_text}")
         mark_sms_as_processed(sms_id, mysql_conn)
         return
 
@@ -111,7 +111,26 @@ def process_sms(sms_data, mysql_conn, pg_conn):
             handle_expense(sms_text, sms_id, mysql_conn, pg_conn, phone_number, identifier, is_mir_card)
             return
 
-    send_telegram_message(f"SMS обработано:\n В SMS не найдены данные для обработки\n{sms_text}")
+    # Если идентификатор найден, но телефон не найден в базе данных
+    if identifier:
+        if find_pattern(income_patterns, sms_text):
+            if is_mir_card:
+                send_telegram_message(f"SMS обработано:\n Найден приход по карте мир {identifier}, но не найден пользователь\n{sms_text}")
+            else:
+                send_telegram_message(f"SMS обработано:\n Найден приход по счету {identifier}, но не найден пользователь\n{sms_text}")
+        elif find_pattern(expense_patterns, sms_text):
+            if is_mir_card:
+                send_telegram_message(f"SMS обработано:\n Найден расход по карте мир {identifier}, но не найден пользователь\n{sms_text}")
+            else:
+                send_telegram_message(f"SMS обработано:\n Найден расход по счету {identifier}, но не найден пользователь\n{sms_text}")
+        else:
+            if is_mir_card:
+                send_telegram_message(f"SMS обработано:\n Найдена карта мир {identifier}, но не найдены данные для обработки (нет расхода/прихода)\n{sms_text}")
+            else:
+                send_telegram_message(f"SMS обработано:\n Найден счет {identifier}, но не найдены данные для обработки (нет расхода/прихода)\n{sms_text}")
+    else:
+        send_telegram_message(f"SMS обработано:\n В SMS не найдены данные для обработки\n{sms_text}")
+    
     mark_sms_as_processed(sms_id, mysql_conn)
 
 def handle_one_time_code(sms_text, sms_id, mysql_conn, pg_conn, phone_number):
