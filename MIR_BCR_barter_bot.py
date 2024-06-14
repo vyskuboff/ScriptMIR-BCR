@@ -194,7 +194,7 @@ def handle_income(sms_text, sms_id, mysql_conn, pg_conn, phone_number, identifie
             comment = f'Автопополнение на {final_amount} BCR по счету {identifier}\n{sms_text}'
 
         # Проверка на дублирование транзакций
-        if is_duplicate_transaction_pg(sender_phone_number, phone_number, final_amount, comment, pg_conn):
+        if is_duplicate_transaction_pg(sender_phone_number, phone_number, final_amount, comment, pg_conn, "приход"):
             mark_sms_as_processed(sms_id, mysql_conn)
             if is_mir_card:
                 send_telegram_message(f"SMS обработано:\n Найдена дублирующая транзакция по карте МИР {identifier} на сумму {amount} - игнорируем смс\n{sms_text}")
@@ -223,7 +223,7 @@ def handle_expense(sms_text, sms_id, mysql_conn, pg_conn, phone_number, identifi
             comment = f'Автосписание на {final_amount} BCR по счету {identifier}\n{sms_text}'
 
         # Проверка на дублирование транзакций
-        if is_duplicate_transaction_pg(phone_number, receiver_phone_number, final_amount, comment, pg_conn):
+        if is_duplicate_transaction_pg(phone_number, receiver_phone_number, final_amount, comment, pg_conn, "расход"):
             mark_sms_as_processed(sms_id, mysql_conn)
             if is_mir_card:
                 send_telegram_message(f"SMS обработано:\n Найдена дублирующая транзакция по карте МИР {identifier} на сумму {amount} - игнорируем смс\n{sms_text}")
@@ -349,8 +349,8 @@ def connect_to_mysql(mysql_params, max_retries=10, delay=2):
 def delete_old_processed_sms(mysql_conn):
     try:
         with mysql_conn.cursor() as cursor:
-            # Удаляем обработанные SMS старше 5 минут
-            five_minutes_ago = datetime.now() - timedelta(minutes=5)
+            # Удаляем обработанные SMS старше 2 минут
+            five_minutes_ago = datetime.now() - timedelta(minutes=2)
             cursor.execute("DELETE FROM sms_messages WHERE processed = TRUE AND received_at < %s", (five_minutes_ago,))
             mysql_conn.commit()
     except Exception as e:
@@ -366,16 +366,20 @@ def is_duplicate_sms(sms_text, mysql_conn):
         logging.error(f"Ошибка при проверке на дублирование SMS: {e}")
         return False
 
-def is_duplicate_transaction_pg(user_phone_number, receiver_phone_number, amount, comment, pg_conn):
+def is_duplicate_transaction_pg(user_phone_number, receiver_phone_number, amount, comment, pg_conn, transaction_type):
     try:
         with pg_conn.cursor() as cursor:
+            # Извлекаем уникальную часть комментария (например, название магазина или отправителя)
+            unique_part = comment.split(' ')[-2]  # Предположим, что уникальная часть находится в предпоследнем слове
             cursor.execute("""
                 SELECT COUNT(*) FROM pending_actions 
                 WHERE user_phone_number = %s 
                 AND receiver_phone_number = %s 
                 AND amount = %s 
                 AND comment LIKE %s
-            """, (user_phone_number, receiver_phone_number, amount, f"%{comment.split(' ')[0]}%"))
+                AND comment LIKE %s
+                AND comment LIKE %s
+            """, (user_phone_number, receiver_phone_number, amount, f"%{comment.split(' ')[0]}%", f"%{transaction_type}%", f"%{unique_part}%"))
             result = cursor.fetchone()
             return result[0] > 0
     except Exception as e:
