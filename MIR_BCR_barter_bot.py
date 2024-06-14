@@ -5,6 +5,7 @@ import math
 import time
 import logging
 import requests
+from datetime import datetime, timedelta
 from config import TOKENTG_BOT,TOKENTG_BOT2, YOUR_CHAT_ID, STATIC_PHONE_NUMBER, PASSWORDDB, PASSWORDMYSQL, HOSTMYSQL, USERMYSQL, DBMYSQL
 
 static_sender_phone_number = STATIC_PHONE_NUMBER
@@ -47,12 +48,17 @@ income_patterns = [
     re.compile(r'Перевод\s+из\s+.*?\+?(\d[\d\s]*[\.,]?\d*)\s*р', re.IGNORECASE),
     re.compile(r'Перевод\s+(\d[\d\s]*[\.,]?\d*)\s*р\s+от', re.IGNORECASE),
     re.compile(r'(?:зачисление|пополнение)\s+(\d[\d\s]*[\.,]?\d*)\s*р', re.IGNORECASE),
-    re.compile(r'зачислен перевод по СБП\s+(\d[\d\s]*[\.,]?\d*)\s*р', re.IGNORECASE)	
+	re.compile(r'зачислен перевод по СБП\s+(\d[\d\s]*[\.,]?\d*)\s*р', re.IGNORECASE)	
 ]
 expense_patterns = [
     re.compile(r'(?:Покупка|Оплата|Списание|Выдача)\s+(\d[\d\s]*[\.,]?\d*)\s*р', re.IGNORECASE),
     re.compile(r'перевод\s+(\d[\d\s]*[\.,]?\d*)\s*р(?!\s+от|\s+из)', re.IGNORECASE),
-    re.compile(r'Покупка по СБП\s+(\d[\d\s]*[\.,]?\d*)\s*р', re.IGNORECASE)
+	re.compile(r'Покупка по СБП\s+(\d[\d\s]*[\.,]?\d*)\s*р', re.IGNORECASE)
+]
+refund_patterns = [
+    re.compile(r'Отмена покупки\s+(\d[\d\s]*[\.,]?\d*)\s*р', re.IGNORECASE),
+    re.compile(r'Отмена платежа\s+(\d[\d\s]*[\.,]?\d*)\s*р', re.IGNORECASE),
+    re.compile(r'Оформлена отмена покупки\s+(\d[\d\s]*[\.,]?\d*)\s*р', re.IGNORECASE)
 ]
 
 # Функция для поиска совпадений по паттернам
@@ -103,12 +109,22 @@ def process_sms(sms_data, mysql_conn, pg_conn):
         if balance_match:
             handle_balance(sms_text, phone_number, pg_conn)
 
+        # Проверка на полное дублирование текста SMS
+        if is_duplicate_sms(sms_text, mysql_conn):
+            mark_sms_as_processed(sms_id, mysql_conn)
+            send_telegram_message(f"SMS обработано:\n Игнорируем SMS, найден дубль\n{sms_text}")
+            return
+        
         if find_pattern(income_patterns, sms_text):
             handle_income(sms_text, sms_id, mysql_conn, pg_conn, phone_number, identifier, is_mir_card)
             return
 
         if find_pattern(expense_patterns, sms_text):
             handle_expense(sms_text, sms_id, mysql_conn, pg_conn, phone_number, identifier, is_mir_card)
+            return
+        
+        if find_pattern(refund_patterns, sms_text):
+            handle_refund(sms_text, sms_id, mysql_conn, pg_conn, phone_number, identifier, is_mir_card)
             return
 
     # Если идентификатор найден, но телефон не найден в базе данных
@@ -123,6 +139,11 @@ def process_sms(sms_data, mysql_conn, pg_conn):
                 send_telegram_message(f"SMS обработано:\n Найден расход по карте мир {identifier}, но не найден пользователь\n{sms_text}")
             else:
                 send_telegram_message(f"SMS обработано:\n Найден расход по счету {identifier}, но не найден пользователь\n{sms_text}")
+        elif find_pattern(refund_patterns, sms_text):
+            if is_mir_card:
+                send_telegram_message(f"SMS обработано:\n Найден возврат по карте мир {identifier}, но не найден пользователь\n{sms_text}")
+            else:
+                send_telegram_message(f"SMS обработано:\n Найден возврат по счету {identifier}, но не найден пользователь\n{sms_text}")        
         else:
             if is_mir_card:
                 send_telegram_message(f"SMS обработано:\n Найдена карта мир {identifier}, но не найдены данные для обработки (нет расхода/прихода)\n{sms_text}")
@@ -171,6 +192,16 @@ def handle_income(sms_text, sms_id, mysql_conn, pg_conn, phone_number, identifie
             comment = f'Автопополнение на {final_amount} BCR по карте мир {identifier}\n{sms_text}'
         else:
             comment = f'Автопополнение на {final_amount} BCR по счету {identifier}\n{sms_text}'
+
+        # Проверка на дублирование транзакций
+        if is_duplicate_transaction_pg(sender_phone_number, phone_number, final_amount, comment, pg_conn):
+            mark_sms_as_processed(sms_id, mysql_conn)
+            if is_mir_card:
+                send_telegram_message(f"SMS обработано:\n Найдена дублирующая транзакция по карте МИР {identifier} на сумму {amount} - игнорируем смс\n{sms_text}")
+            else:
+                send_telegram_message(f"SMS обработано:\n Найдена дублирующая транзакция по счету {identifier} на сумму {amount} - игнорируем смс\n{sms_text}")
+            return False
+
         create_pending_action(sender_phone_number, phone_number, final_amount, sender_info, user_info, comment, pg_conn)
         mark_sms_as_processed(sms_id, mysql_conn)
         send_telegram_message(f"SMS обработано:\n {comment}")
@@ -190,7 +221,43 @@ def handle_expense(sms_text, sms_id, mysql_conn, pg_conn, phone_number, identifi
             comment = f'Автосписание на {final_amount} BCR по карте мир {identifier}\n{sms_text}'
         else:
             comment = f'Автосписание на {final_amount} BCR по счету {identifier}\n{sms_text}'
+
+        # Проверка на дублирование транзакций
+        if is_duplicate_transaction_pg(phone_number, receiver_phone_number, final_amount, comment, pg_conn):
+            mark_sms_as_processed(sms_id, mysql_conn)
+            if is_mir_card:
+                send_telegram_message(f"SMS обработано:\n Найдена дублирующая транзакция по карте МИР {identifier} на сумму {amount} - игнорируем смс\n{sms_text}")
+            else:
+                send_telegram_message(f"SMS обработано:\n Найдена дублирующая транзакция по счету {identifier} на сумму {amount} - игнорируем смс\n{sms_text}")
+            return False
+
         create_pending_action(phone_number, receiver_phone_number, final_amount, user_info, receiver_info, comment, pg_conn)
+        mark_sms_as_processed(sms_id, mysql_conn)
+        send_telegram_message(f"SMS обработано:\n {comment}")
+        return True
+    return False
+
+def handle_refund(sms_text, sms_id, mysql_conn, pg_conn, phone_number, identifier, is_mir_card):
+    user_info = find_info_by_phone(phone_number, pg_conn)
+    amount_match = find_pattern(refund_patterns, sms_text)
+    if amount_match:
+        amount_str = amount_match.replace("\xa0", "").replace(" ", "").replace(",", ".")
+        amount = float(amount_str)
+        final_amount = math.floor(amount * 0.96)
+        sender_phone_number = static_sender_phone_number
+        sender_info = find_info_by_phone(sender_phone_number, pg_conn)
+        if is_mir_card:
+            comment = f'Возврат на {final_amount} BCR по карте мир {identifier}\n{sms_text}'
+        else:
+            comment = f'Возврат на {final_amount} BCR по счету {identifier}\n{sms_text}'
+
+        # Проверка на дублирование транзакций
+        if is_duplicate_transaction_pg(sender_phone_number, phone_number, final_amount, comment, pg_conn):
+            mark_sms_as_processed(sms_id, mysql_conn)
+            send_telegram_message(f"SMS обработано:\n Найдена дублирующая транзакция по карте/счету {identifier} на сумму {amount}\n{sms_text}")
+            return False
+
+        create_pending_action(sender_phone_number, phone_number, final_amount, sender_info, user_info, comment, pg_conn)
         mark_sms_as_processed(sms_id, mysql_conn)
         send_telegram_message(f"SMS обработано:\n {comment}")
         return True
@@ -279,6 +346,42 @@ def connect_to_mysql(mysql_params, max_retries=10, delay=2):
             time.sleep(delay)
     raise Exception("Не удалось подключиться к MySQL после нескольких попыток")
 
+def delete_old_processed_sms(mysql_conn):
+    try:
+        with mysql_conn.cursor() as cursor:
+            # Удаляем обработанные SMS старше 5 минут
+            five_minutes_ago = datetime.now() - timedelta(minutes=5)
+            cursor.execute("DELETE FROM sms_messages WHERE processed = TRUE AND received_at < %s", (five_minutes_ago,))
+            mysql_conn.commit()
+    except Exception as e:
+        logging.error(f"Ошибка при удалении старых обработанных SMS: {e}")
+
+def is_duplicate_sms(sms_text, mysql_conn):
+    try:
+        with mysql_conn.cursor() as cursor:
+            cursor.execute("SELECT COUNT(*) FROM sms_messages WHERE message = %s AND processed = TRUE", (sms_text,))
+            result = cursor.fetchone()
+            return result['COUNT(*)'] > 0
+    except Exception as e:
+        logging.error(f"Ошибка при проверке на дублирование SMS: {e}")
+        return False
+
+def is_duplicate_transaction_pg(user_phone_number, receiver_phone_number, amount, comment, pg_conn):
+    try:
+        with pg_conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT COUNT(*) FROM pending_actions 
+                WHERE user_phone_number = %s 
+                AND receiver_phone_number = %s 
+                AND amount = %s 
+                AND comment LIKE %s
+            """, (user_phone_number, receiver_phone_number, amount, f"%{comment.split(' ')[0]}%"))
+            result = cursor.fetchone()
+            return result[0] > 0
+    except Exception as e:
+        logging.error(f"Ошибка при проверке на дублирование транзакции в PostgreSQL: {e}")
+        return False
+
 def main():
     error_notified = False
 
@@ -300,6 +403,9 @@ def main():
                 # Обрабатываем каждое SMS
                 for sms_data in unprocessed_sms:
                     process_sms(sms_data, mysql_conn, pg_conn)
+
+                # Удаляем старые обработанные SMS
+                delete_old_processed_sms(mysql_conn)
 
                 # Сбрасываем флаг ошибки при успешном соединении
                 error_notified = False
