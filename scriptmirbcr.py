@@ -85,6 +85,8 @@ def process_sms(sms_data, mysql_conn, pg_conn):
     sender = sms_data['sender']
     timestamp = sms_data['received_at']  # Предполагаем, что время получения SMS хранится в поле 'received_at'
 
+    logging.info(f"Начало обработки SMS с ID: {sms_id}")
+
     if sender not in allowed_senders:
         send_telegram_message(f"SMS обработано:\n Отправителя {sender} нет в списке обрабатываемых - игнорируем смс\n{sms_text}")
         mark_sms_as_processed(sms_id, mysql_conn)
@@ -92,6 +94,11 @@ def process_sms(sms_data, mysql_conn, pg_conn):
 
     if find_pattern(stop_words_patterns, sms_text):
         send_telegram_message(f"SMS обработано:\n Найдено стоп слово (Отказ или недостаточно средств) - игнорируем смс\n{sms_text}")
+        mark_sms_as_processed(sms_id, mysql_conn)
+        return
+
+    if "Ваш доход зарегистрирован в ФНС. Чек по услуге" in sms_text:
+        send_telegram_message(f"SMS обработано:\n Найдено сообщение о доходе, зарегистрированном в ФНС - игнорируем смс")
         mark_sms_as_processed(sms_id, mysql_conn)
         return
 
@@ -109,6 +116,8 @@ def process_sms(sms_data, mysql_conn, pg_conn):
         identifier = mir_account_match.group(1) if mir_account_match else None
         phone_number = find_phone_by_account(identifier, pg_conn) if identifier else None
 
+    logging.info(f"Идентификатор: {identifier}, Телефон: {phone_number}, Карта МИР: {is_mir_card}")
+
     if phone_number:
         if find_pattern(one_time_code_patterns, sms_text):
             handle_one_time_code(sms_text, sms_id, mysql_conn, pg_conn, phone_number)
@@ -125,16 +134,20 @@ def process_sms(sms_data, mysql_conn, pg_conn):
             return
         
         merchant = find_pattern(merchant_patterns, sms_text)
+        logging.info(f"Мерчант: {merchant}")
 
         if find_pattern(income_patterns, sms_text):
+            logging.info(f"Обработка прихода для SMS с ID: {sms_id}")
             handle_income(sms_text, sms_id, mysql_conn, pg_conn, phone_number, identifier, is_mir_card, sender, timestamp, merchant)
             return
 
         if find_pattern(expense_patterns, sms_text):
+            logging.info(f"Обработка расхода для SMS с ID: {sms_id}")
             handle_expense(sms_text, sms_id, mysql_conn, pg_conn, phone_number, identifier, is_mir_card, sender, timestamp, merchant)
             return
 
         if find_pattern(refund_patterns, sms_text):
+            logging.info(f"Обработка возврата для SMS с ID: {sms_id}")
             handle_refund(sms_text, sms_id, mysql_conn, pg_conn, phone_number, identifier, is_mir_card, sender, timestamp, merchant)
             return
 
@@ -154,7 +167,7 @@ def process_sms(sms_data, mysql_conn, pg_conn):
             if is_mir_card:
                 send_telegram_message(f"SMS обработано:\n Найден возврат по карте мир {identifier}, но не найден пользователь\n{sms_text}")
             else:
-                send_telegram_message(f"SMS обработано:\n Найден возврат по счету {identifier}, но не найден пользователь\n{sms_text}")        
+                send_telegram_message(f"SMS обработано:\n Найден возврат по счету {identifier}, но не найден пользователь\n{sms_text}")
         else:
             if is_mir_card:
                 send_telegram_message(f"SMS обработано:\n Найдена карта мир {identifier}, но не найдены данные для обработки (нет расхода/прихода)\n{sms_text}")
@@ -164,7 +177,7 @@ def process_sms(sms_data, mysql_conn, pg_conn):
         send_telegram_message(f"SMS обработано:\n В SMS не найдены данные для обработки\n{sms_text}")
     
     mark_sms_as_processed(sms_id, mysql_conn)
-  
+
 def handle_one_time_code(sms_text, sms_id, mysql_conn, pg_conn, phone_number):
     user_id = find_user_id_by_phone(phone_number, pg_conn)
     if user_id:
@@ -211,9 +224,9 @@ def handle_income(sms_text, sms_id, mysql_conn, pg_conn, phone_number, identifie
                 comment = f'Автопополнение на {final_amount} BCR по счету {identifier}\n{sms_text}'
 
             # Проверка на дублирование транзакций
-            if is_duplicate_transaction(sms_id, "приход", final_amount, balance, identifier, is_mir_card, sender, timestamp, merchant, mysql_conn):
+            if is_duplicate_transaction("приход", final_amount, identifier, is_mir_card, sender, merchant, mysql_conn):
                 comment += "\nВнимание: транзакция возможно дублирующая, проверьте."
-                send_telegram_message(f"SMS обработано:\n Найдена дублирующая транзакция по карте/счету {identifier} на сумму {amount} Игнорируем смс:\n{sms_text}")
+                send_telegram_message(f"SMS обработано:\n Найдена дублирующая транзакция по карте/счету {identifier} на сумму {amount} - обработка прекращена\n{sms_text}")
                 mark_sms_as_processed(sms_id, mysql_conn)  # Помечаем SMS как обработанное
                 return False  # Прекращаем обработку
 
@@ -258,11 +271,9 @@ def handle_expense(sms_text, sms_id, mysql_conn, pg_conn, phone_number, identifi
                 comment = f'Автосписание на {final_amount} BCR по счету {identifier}\n{sms_text}'
 
             # Проверка на дублирование транзакций
-            if is_duplicate_transaction(sms_id, "расход", final_amount, balance, identifier, is_mir_card, sender, timestamp, merchant, mysql_conn):
+            if is_duplicate_transaction("расход", final_amount, identifier, is_mir_card, sender, merchant, mysql_conn):
                 comment += "\nВнимание: транзакция возможно дублирующая, проверьте."
-                send_telegram_message(f"SMS обработано:\n Найдена дублирующая транзакция по карте/счету {identifier} на сумму {amount} Игнорируем смс:\n{sms_text}")
-                mark_sms_as_processed(sms_id, mysql_conn)  # Помечаем SMS как обработанное
-                return False  # Прекращаем обработку
+                send_telegram_message(f"SMS обработано:\n Найдена дублирующая транзакция по карте/счету {identifier} на сумму {amount} - обработка продолжена\n{sms_text}")
 
             create_pending_action(phone_number, receiver_phone_number, final_amount, user_info, receiver_info, comment, pg_conn)
             mark_sms_as_processed(sms_id, mysql_conn)
@@ -307,7 +318,7 @@ def handle_refund(sms_text, sms_id, mysql_conn, pg_conn, phone_number, identifie
             # Проверка на дублирование транзакций
             if is_duplicate_transaction(sms_id, "возврат", final_amount, balance, identifier, is_mir_card, sender, timestamp, merchant, mysql_conn):
                 comment += "\nВнимание: транзакция возможно дублирующая, проверьте."
-                send_telegram_message(f"SMS обработано:\н Найдена дублирующая транзакция по карте/счету {identifier} на сумму {amount} Игнорируем смс:\n{sms_text}")
+                send_telegram_message(f"SMS обработано:\n Найдена дублирующая транзакция по карте/счету {identifier} на сумму {amount} Игнорируем смс:\n{sms_text}")
                 mark_sms_as_processed(sms_id, mysql_conn)  # Помечаем SMS как обработанное
                 return False  # Прекращаем обработку
 
@@ -322,7 +333,7 @@ def handle_refund(sms_text, sms_id, mysql_conn, pg_conn, phone_number, identifie
                 """, (sms_id, "возврат", final_amount, balance, identifier, is_mir_card, sender, timestamp, merchant))
                 mysql_conn.commit()
 
-            send_telegram_message(f"SMS обработано:\н {comment}")
+            send_telegram_message(f"SMS обработано:\n {comment}")
             return True
         else:
             logging.error(f"Не удалось извлечь данные из SMS с ID: {sms_id}")
@@ -442,22 +453,49 @@ def is_duplicate_sms(sms_text, mysql_conn):
         logging.error(f"Ошибка при проверке на дублирование SMS: {e}")
         return False
 
-def is_duplicate_transaction(sms_id, transaction_type, amount, balance, identifier, is_mir_card, sender, timestamp, merchant, mysql_conn):
+# def is_duplicate_transaction(sms_id, transaction_type, amount, balance, identifier, is_mir_card, sender, timestamp, merchant, mysql_conn):
+#     try:
+#         logging.info(f"Проверка на дублирование транзакции для SMS с ID: {sms_id}, тип: {transaction_type}, сумма: {amount}, баланс: {balance}, идентификатор: {identifier}, карта МИР: {is_mir_card}, отправитель: {sender}, время: {timestamp}, мерчант: {merchant}")
+#         with mysql_conn.cursor() as cursor:
+#             cursor.execute("""
+#                 SELECT COUNT(*) FROM transaction_records 
+#                 WHERE sms_id != %s 
+#                 AND transaction_type = %s 
+#                 AND amount = %s 
+#                 AND identifier = %s 
+#                 AND is_mir_card = %s 
+#                 AND sender = %s
+#                 AND timestamp = %s
+#                 AND merchant = %s
+#                 AND timestamp > NOW() - INTERVAL 1 HOUR
+#             """, (sms_id, transaction_type, amount, identifier, is_mir_card, sender, timestamp, merchant))
+#             result = cursor.fetchone()
+#             logging.info(f"Результат проверки на дублирование транзакции: {result['COUNT(*)']}")
+#             return result['COUNT(*)'] > 0
+#     except Exception as e:
+#         logging.error(f"Ошибка при проверке на дублирование транзакции в MySQL: {e}")
+#         return False
+
+def is_duplicate_transaction(transaction_type, amount, identifier, is_mir_card, sender, merchant, mysql_conn):
     try:
+        logging.info(f"Проверка на дублирование транзакции: тип: {transaction_type}, сумма: {amount}, идентификатор: {identifier}, карта МИР: {is_mir_card}, отправитель: {sender}, мерчант: {merchant}")
         with mysql_conn.cursor() as cursor:
-            cursor.execute("""
+            query = """
                 SELECT COUNT(*) FROM transaction_records 
-                WHERE sms_id != %s 
-                AND transaction_type = %s 
+                WHERE transaction_type = %s 
                 AND amount = %s 
                 AND identifier = %s 
                 AND is_mir_card = %s 
                 AND sender = %s
-                AND timestamp = %s
                 AND merchant = %s
                 AND timestamp > NOW() - INTERVAL 1 HOUR
-            """, (sms_id, transaction_type, amount, identifier, is_mir_card, sender, timestamp, merchant))
+            """
+            params = (transaction_type, amount, identifier, is_mir_card, sender, merchant)
+            logging.info(f"SQL Query: {query}")
+            logging.info(f"Query Parameters: {params}")
+            cursor.execute(query, params)
             result = cursor.fetchone()
+            logging.info(f"Результат проверки на дублирование транзакции: {result}")
             return result['COUNT(*)'] > 0
     except Exception as e:
         logging.error(f"Ошибка при проверке на дублирование транзакции в MySQL: {e}")
